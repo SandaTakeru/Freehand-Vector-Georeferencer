@@ -1,26 +1,27 @@
 # -*- coding: utf-8 -*-
-'''ジオリファレンス用のマップツール。
+'''Map tool for georeferencing.
 
-新規 GCP の追加:
-  1. 変換元を mouse press で選ぶ（優先順: 対象ジオメトリのノード →
-     他の表示中レイヤのノード → 任意点）
-  2. 対応する新座標位置で mouse release → GCP を追加
+Adding a new GCP:
+  1. Pick the source with mouse press (priority: vertex of the target geometry
+     -> vertex of another visible layer -> free point)
+  2. Release at the matching new position -> add the GCP
 
-既存 GCP の操作:
-  - 軽くクリック → 変換計算への有効/無効を切替
-  - ドラッグ → 変換先(dst)の位置を移動
+Operating an existing GCP:
+  - light click -> toggle whether it is included in the fit
+  - drag        -> move the destination (dst)
 
-補助:
-  - マウス下で掴める元ノードを常時ハイライト表示
-  - ドラッグ中はカーソル位置を仮対応点としてライブプレビュー
-  - 変換先は表示中の全ベクタレイヤ（自己含む）の頂点へ吸着
+Helpers:
+  - the grabbable source node under the cursor is always highlighted
+  - while dragging, the cursor position acts as a provisional GCP for a live
+    preview
+  - destinations snap to the vertices of any visible vector layer (incl. self)
 '''
 
 from qgis.core import Qgis, QgsPointXY
 from qgis.gui import QgsMapTool, QgsRubberBand, QgsVertexMarker
 from qgis.PyQt.QtGui import QColor
 
-# スナップ・クリック判定のピクセル許容量
+# Pixel tolerance for snapping / click detection.
 SNAP_PIXELS = 14
 CLICK_PIXELS = 6
 
@@ -32,16 +33,16 @@ class GeorefMapTool(QgsMapTool):
         super().__init__(self.canvas)
         self.session = session
 
-        self._pending_src = None      # スナップした元座標 (x, y)
-        self._press_screen = None     # 押下時のスクリーン座標
-        self._press_gcp = None        # 押下時に近接していた既存 GCP の index
+        self._pending_src = None      # snapped source coordinate (x, y)
+        self._press_screen = None     # screen position at press
+        self._press_gcp = None        # index of the nearby existing GCP at press
 
-        # ドラッグ中の変位ガイド線
+        # Displacement guide line shown while dragging.
         self.rb_drag = QgsRubberBand(self.canvas, Qgis.GeometryType.Line)
         self.rb_drag.setColor(QColor(255, 140, 0, 220))
         self.rb_drag.setWidth(2)
 
-        # 掴める元ノードのハイライト（黄色の丸）
+        # Highlight for the grabbable source node (yellow circle).
         self.hoverMarker = QgsVertexMarker(self.canvas)
         self.hoverMarker.setIconType(QgsVertexMarker.ICON_CIRCLE)
         self.hoverMarker.setColor(QColor(255, 210, 0))
@@ -49,7 +50,7 @@ class GeorefMapTool(QgsMapTool):
         self.hoverMarker.setPenWidth(3)
         self.hoverMarker.hide()
 
-        # 変換先スナップのハイライト（水色の箱）
+        # Highlight for the destination snap (cyan box).
         self.destMarker = QgsVertexMarker(self.canvas)
         self.destMarker.setIconType(QgsVertexMarker.ICON_BOX)
         self.destMarker.setColor(QColor(0, 200, 255))
@@ -61,9 +62,10 @@ class GeorefMapTool(QgsMapTool):
         return self.canvas.mapUnitsPerPixel() * pixels
 
     def _snapped_dest(self, screen_pos):
-        '''スクリーン座標から変換先座標を求める（可能ならスナップ）。
+        '''Resolves the destination coordinate from a screen position (snapping
+        when possible).
 
-        戻り値: (QgsPointXY, snapped: bool)
+        Returns: (QgsPointXY, snapped: bool)
         '''
         cur = self.toMapCoordinates(screen_pos)
         snap = self.session.snap_dest(cur, self._tol_map(SNAP_PIXELS))
@@ -77,18 +79,18 @@ class GeorefMapTool(QgsMapTool):
         self._press_screen = e.pos()
         map_pt = self.toMapCoordinates(e.pos())
 
-        # まず既存 GCP の近接判定。近ければ「既存 GCP の編集」を優先する
-        # （クリック＝有効切替 / ドラッグ＝変換先 dst の移動）。
+        # Check proximity to an existing GCP first; if close, prefer editing it
+        # (click = toggle on/off, drag = move the destination dst).
         self._press_gcp = self.session.nearest_gcp(
             map_pt, self._tol_map(SNAP_PIXELS))
         if self._press_gcp is not None:
             self._pending_src = None
             return
 
-        # 変換元の決定。優先順:
-        #   1. 対象ジオメトリのノード（厳密な元座標）
-        #   2. 他の表示中レイヤのノード（マップ座標→逆変換で元座標へ）
-        #   3. 任意点（ノードなし。マップ座標→逆変換で元座標へ）
+        # Resolve the source. Priority:
+        #   1. vertex of the target geometry (exact source coordinate)
+        #   2. vertex of another visible layer (map coord -> inverse to source)
+        #   3. free point (no node; map coord -> inverse to source)
         tol = self._tol_map(SNAP_PIXELS)
         src = self.session.snap_source(map_pt, tol)
         if src is not None:
@@ -98,7 +100,8 @@ class GeorefMapTool(QgsMapTool):
         else:
             snapped = self.session.snap_source_other(map_pt, tol)
             pick = snapped if snapped is not None else (map_pt.x(), map_pt.y())
-            # 任意点/他レイヤは対象地物を特定しない（単一地物は近傍地物で確定）
+            # A free point / other layer does not identify a target feature
+            # (single-feature mode locks onto the nearest feature instead).
             self.session._last_snap_fid = None
             self._pending_src = self.session.map_to_source(pick)
             self.hoverMarker.setCenter(QgsPointXY(pick[0], pick[1]))
@@ -109,7 +112,7 @@ class GeorefMapTool(QgsMapTool):
             return
 
         if self._press_gcp is not None:
-            # 既存 GCP の変換先 dst をドラッグ移動（ライブプレビュー）
+            # Drag the destination dst of an existing GCP (live preview).
             dest, snapped = self._snapped_dest(e.pos())
             start = self.session.preview_pos(self.session.gcps[self._press_gcp].src)
             self.rb_drag.reset(Qgis.GeometryType.Line)
@@ -123,7 +126,7 @@ class GeorefMapTool(QgsMapTool):
             self.session.set_drag_gcp_preview(
                 self._press_gcp, (dest.x(), dest.y()))
         elif self._pending_src is not None:
-            # ドラッグ中: カーソル位置を仮対応点としてライブプレビュー
+            # Dragging: use the cursor position as a provisional GCP for preview.
             dest, snapped = self._snapped_dest(e.pos())
             start = self.session.preview_pos(self._pending_src)
             self.rb_drag.reset(Qgis.GeometryType.Line)
@@ -137,7 +140,7 @@ class GeorefMapTool(QgsMapTool):
             self.session.set_drag_preview(
                 self._pending_src, (dest.x(), dest.y()))
         else:
-            # ホバー中: 掴める元ノード（対象ジオメトリ／他レイヤ）をハイライト
+            # Hovering: highlight the grabbable source node (target / other layer).
             map_pt = self.toMapCoordinates(e.pos())
             tol = self._tol_map(SNAP_PIXELS)
             src = self.session.snap_source(map_pt, tol)
@@ -163,7 +166,7 @@ class GeorefMapTool(QgsMapTool):
 
         moved = (e.pos() - self._press_screen).manhattanLength()
 
-        # 既存 GCP 上の操作: クリック＝有効切替 / ドラッグ＝変換先 dst の移動
+        # Operating an existing GCP: click = toggle, drag = move destination dst.
         if self._press_gcp is not None:
             if moved <= CLICK_PIXELS:
                 self.session.toggle_gcp(self._press_gcp)
@@ -174,7 +177,7 @@ class GeorefMapTool(QgsMapTool):
             self._reset_pending()
             return
 
-        # 変換元が決まっていれば GCP を追加（押下時に必ず決まる）
+        # Add a GCP if a source was resolved (always set on press).
         if self._pending_src is not None:
             dest, _snapped = self._snapped_dest(e.pos())
             self.session.add_gcp(self._pending_src, (dest.x(), dest.y()))

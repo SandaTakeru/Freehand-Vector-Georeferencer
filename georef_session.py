@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-'''ジオリファレンス作業のコアエンジン。
+'''Core engine for a georeferencing session.
 
-GCP（対応点）の保持・変換行列の計算・プレビュー描画・マーカー表示・
-残差計算・出力レイヤ生成までを担当する。UI（ドック）からはこのクラスを操作する。
+Holds the GCPs (control points), computes the transform matrix, draws the
+preview, shows the markers, computes residuals and builds the output layer.
+The UI (dock) drives this class.
 '''
 
 import csv
@@ -28,12 +29,12 @@ from qgis.PyQt.QtGui import QColor
 from . import transform
 
 
-# スナップ用アンカー頂点の上限（大量頂点データ対策で間引く）
+# Max number of anchor vertices for snapping (decimated for heavy data).
 MAX_ANCHORS = 5000
-# プレビュー簡略化を始める総頂点数のしきい値
+# Total-vertex threshold above which the preview is simplified.
 SIMPLIFY_THRESHOLD = 20000
 
-# プレビュー品質ごとの更新間隔（ミリ秒）と簡略化係数
+# Update interval (ms) and simplification factor per preview quality.
 QUALITY = {
     'High (30fps)': {'interval': 33, 'simplify': 0.5},
     'Medium (10fps)': {'interval': 100, 'simplify': 1.0},
@@ -42,7 +43,7 @@ QUALITY = {
 }
 DEFAULT_QUALITY = 'Medium (10fps)'
 
-# 残差カラーの端点（緑→黄→赤）
+# Endpoints of the residual color ramp (green -> yellow -> red).
 _COLOR_GREEN = (0, 180, 0)
 _COLOR_YELLOW = (230, 200, 0)
 _COLOR_RED = (220, 0, 0)
@@ -53,9 +54,11 @@ def _lerp(a, b, f):
 
 
 def residual_color(mag, max_mag):
-    '''残差の大きさを 0..max_mag でリニアに 緑→黄→赤 へ補間した色を返す。
+    '''Returns a color interpolated linearly green -> yellow -> red over
+    0..max_mag.
 
-    同じ mag は同じ色になる。max_mag が 0（全点が同値・残差なし）なら緑。
+    Equal mag values get the same color. If max_mag is 0 (all equal, no
+    residual) the color is green.
     '''
     if max_mag <= 1e-12:
         t = 0.0
@@ -73,7 +76,7 @@ def residual_color(mag, max_mag):
 
 
 class Gcp(object):
-    '''1 つの対応点。src は元座標、dst は合わせ込み先座標。'''
+    '''A single control point. src is the source coordinate, dst is the target.'''
 
     def __init__(self, src, dst, active=True):
         self.src = (float(src[0]), float(src[1]))
@@ -91,44 +94,46 @@ class GeorefSession(object):
         self.mode = mode              # 'helmert' / 'affine'
         self.lock_scale = lock_scale
         self.quality = quality if quality in QUALITY else DEFAULT_QUALITY
-        self.on_update = on_update    # 統計・テーブル更新を UI へ通知するコールバック
+        self.on_update = on_update    # callback notifying the UI of stats/table
 
         self.gcps = []
         self.matrix = transform._identity()
-        self._draw_matrix = transform._identity()  # 実際に描画する行列（ドラッグ中は仮値）
-        self._dragging = False        # ドラッグ中はプレビューを軽めにする
+        self._draw_matrix = transform._identity()  # matrix actually drawn (provisional while dragging)
+        self._dragging = False        # render a lighter preview while dragging
 
         self._geom_type = QgsWkbTypes.geometryType(layer.wkbType())
-        self._features = []           # (fid, QgsGeometry) のリスト（変換対象の元ジオメトリ）
+        self._features = []           # list of (fid, QgsGeometry): source geometries to transform
         self._anchors = np.zeros((0, 2))
-        self._anchor_fids = np.zeros(0, dtype=np.int64)  # 各アンカー頂点の所属地物 id
+        self._anchor_fids = np.zeros(0, dtype=np.int64)  # feature id of each anchor vertex
         self._total_vertices = 0
         self._layer_was_visible = True
         self._layer_hidden = False
 
-        # 単一地物モード用: 全地物を候補として保持し、最初に掴んだノードの地物に絞る
-        self._candidates = []         # (fid, QgsGeometry) の全候補
-        self._locked_fid = None       # 確定した対象地物 id（単一地物モード）
-        self._last_snap_fid = None    # 直近に snap_source で掴んだノードの地物 id
+        # Single-feature mode: keep all features as candidates and narrow down
+        # to the feature of the first grabbed node.
+        self._candidates = []         # all candidate (fid, QgsGeometry)
+        self._locked_fid = None       # confirmed target feature id (single mode)
+        self._last_snap_fid = None    # feature id of the node last grabbed by snap_source
 
-        # プレビュー用ラバーバンド
+        # Rubber band for the preview.
         self.rb_preview = QgsRubberBand(self.canvas, self._geom_type)
         self.rb_preview.setColor(QColor(30, 120, 255, 180))
         self.rb_preview.setFillColor(QColor(30, 120, 255, 40))
         self.rb_preview.setWidth(2)
-        # 単一地物モードで対象外の地物を元位置に表示しておく静的プレビュー
+        # Static preview that keeps the non-target features at their original
+        # position in single-feature mode.
         self.rb_static = QgsRubberBand(self.canvas, self._geom_type)
         self.rb_static.setColor(QColor(120, 120, 120, 160))
         self.rb_static.setFillColor(QColor(120, 120, 120, 30))
         self.rb_static.setWidth(1)
-        # 残差ベクトル（変換後src → dst）の表示
+        # Residual vectors (transformed src -> dst).
         self.rb_residual = QgsRubberBand(self.canvas, Qgis.GeometryType.Line)
         self.rb_residual.setColor(QColor(255, 0, 0, 200))
         self.rb_residual.setWidth(1)
 
-        self.markers = []             # GCP ごとの QgsVertexMarker
+        self.markers = []             # one QgsVertexMarker per GCP
 
-        # プレビュー更新のスロットリング
+        # Throttling of preview updates.
         self._last_update = 0.0
         self._timer = QTimer()
         self._timer.setSingleShot(True)
@@ -137,19 +142,20 @@ class GeorefSession(object):
         self._build_scope()
 
     # ------------------------------------------------------------------
-    # 初期化・対象地物の収集
+    # Initialization / collecting the target features
     # ------------------------------------------------------------------
     def _build_scope(self):
-        '''スコープ設定に従って対象地物とスナップ用アンカーを集める。
+        '''Collects the target features and snapping anchors per the scope.
 
-        単一地物モードでは、開始時は全地物を候補として読み込み、最初に掴んだ
-        ノードの地物を対象として確定する（_lock_single で絞り込む）。
+        In single-feature mode all features are loaded as candidates at start,
+        and the feature of the first grabbed node is confirmed as the target
+        (narrowed down by _lock_single).
         '''
         if self.scope == 'all':
             feats = list(self.layer.getFeatures())
         elif self.scope == 'selected':
             feats = list(self.layer.getSelectedFeatures())
-        else:  # single: 全地物を候補にする
+        else:  # single: keep all features as candidates
             feats = list(self.layer.getFeatures())
 
         collected = []
@@ -160,7 +166,7 @@ class GeorefSession(object):
             collected.append((f.id(), QgsGeometry(g)))
 
         if self.scope == 'single':
-            # 候補として全地物を保持し、確定前は全地物をプレビュー対象にする
+            # Keep all features as candidates; preview them all until confirmed.
             self._candidates = collected
             self._features = list(collected)
         else:
@@ -170,7 +176,8 @@ class GeorefSession(object):
         self._rebuild_anchors()
 
     def _rebuild_anchors(self):
-        '''現在の _features からスナップ用アンカー（頂点と所属地物 id）を作り直す。'''
+        '''Rebuilds the snapping anchors (vertices and feature ids) from
+        the current _features.'''
         pts = []
         fids = []
         for fid, g in self._features:
@@ -181,7 +188,7 @@ class GeorefSession(object):
         if pts:
             arr = np.array(pts, dtype=float)
             fid_arr = np.array(fids, dtype=np.int64)
-            # 多すぎる場合はストライドで間引く（スナップ候補の軽量化）
+            # Decimate by stride if there are too many (lighter snap candidates).
             if len(arr) > MAX_ANCHORS:
                 step = int(np.ceil(len(arr) / MAX_ANCHORS))
                 arr = arr[::step]
@@ -199,16 +206,16 @@ class GeorefSession(object):
         return self._total_vertices
 
     # ------------------------------------------------------------------
-    # 設定変更
+    # Settings changes
     # ------------------------------------------------------------------
     def set_transform(self, mode, lock):
-        # モードと等倍固定をまとめて設定し、再計算は一度だけ
+        # Set mode and fixed-scale together, recompute only once.
         self.mode = mode
         self.lock_scale = lock
         self.recompute()
 
     def transform_label(self):
-        '''出力レイヤ名などに使う変換種別の短いラベル。'''
+        '''Short label of the transform type, used e.g. in the output layer name.'''
         if self.mode == 'affine':
             return 'Affine'
         return 'Helmert(x1)' if self.lock_scale else 'Helmert'
@@ -218,21 +225,22 @@ class GeorefSession(object):
             self.quality = quality
 
     # ------------------------------------------------------------------
-    # GCP 操作
+    # GCP operations
     # ------------------------------------------------------------------
     def add_gcp(self, src, dst):
-        # 単一地物モードでは、最初の変換元から対象地物を確定する
+        # In single-feature mode, confirm the target feature from the first source.
         self._ensure_single_locked(src)
         self.gcps.append(Gcp(src, dst))
-        # 1 点目を追加したら元レイヤ表示を消し、プレビューに切り替える
+        # On the first point, hide the source layer and switch to the preview.
         if len(self.gcps) == 1:
             self._hide_source_layer()
         self.recompute()
 
     def _ensure_single_locked(self, src):
-        '''単一地物モードで未確定なら対象地物を確定する。
+        '''In single-feature mode, confirm the target feature if not yet set.
 
-        ノードを掴んでいればその地物、任意点/他レイヤなら src に最も近い候補地物。
+        If a node was grabbed, use its feature; for a free point / other layer,
+        use the candidate feature nearest to src.
         '''
         if self.scope != 'single' or self._locked_fid is not None:
             return
@@ -244,7 +252,8 @@ class GeorefSession(object):
                 self._lock_single(fid)
 
     def _lock_single(self, fid):
-        '''単一地物モードで対象地物を fid に絞り込む（プレビューで動くのは1地物だけ）。'''
+        '''Narrow single-feature mode to the target feature fid (only one
+        feature moves in the preview).'''
         geom = dict(self._candidates).get(fid)
         if geom is None:
             return
@@ -254,16 +263,18 @@ class GeorefSession(object):
         self._refresh_static()
 
     def _unlock_single(self):
-        '''単一地物モードの絞り込みを解除し、全候補に戻す。'''
+        '''Release the single-feature narrowing and return to all candidates.'''
         self._locked_fid = None
         self._features = list(self._candidates)
         self._rebuild_anchors()
         self._refresh_static()
 
     def _refresh_static(self):
-        '''対象外の地物を元位置に静的表示する（元レイヤ非表示中のみ）。
+        '''Show the non-target features statically at their original position
+        (only while the source layer is hidden).
 
-        元レイヤ表示中は地物本体が見えているので静的表示はしない（二重描画回避）。
+        While the source layer is visible the features themselves are shown, so
+        the static preview is skipped (avoids double drawing).
         '''
         self.rb_static.reset(self._geom_type)
         if (self.scope == 'single' and self._locked_fid is not None
@@ -283,7 +294,7 @@ class GeorefSession(object):
             self.recompute()
 
     def move_gcp_dst(self, idx, new_dst):
-        '''既存 GCP の変換先（dst）座標を移動して確定する。'''
+        '''Move and commit the destination (dst) coordinate of an existing GCP.'''
         if 0 <= idx < len(self.gcps):
             self.gcps[idx].dst = (float(new_dst[0]), float(new_dst[1]))
             self.recompute()
@@ -293,7 +304,7 @@ class GeorefSession(object):
             self.gcps.pop()
             if not self.gcps:
                 self._restore_source_layer()
-                # 単一地物モードは対象未確定に戻し、別地物を選び直せるようにする
+                # Single mode: go back to unconfirmed so another feature can be picked.
                 if self.scope == 'single':
                     self._unlock_single()
             self.recompute()
@@ -309,7 +320,7 @@ class GeorefSession(object):
         return [g for g in self.gcps if g.active]
 
     # ------------------------------------------------------------------
-    # 変換計算とプレビュー
+    # Transform computation and preview
     # ------------------------------------------------------------------
     def recompute(self):
         active = self.active_gcps()
@@ -327,8 +338,9 @@ class GeorefSession(object):
         self._notify_stats()
 
     def set_drag_preview(self, src, dst):
-        '''ドラッグ中の仮対応点(src→dst)を加えた変換でプレビューだけ更新する。'''
-        # 単一地物モードはドラッグ開始時点で対象を1地物に確定し、動くのを1つに絞る
+        '''Update only the preview with a transform that includes the
+        provisional point (src -> dst) being dragged.'''
+        # In single mode, confirm the target on drag start so only one feature moves.
         self._ensure_single_locked(src)
         active = self.active_gcps()
         srcs = [g.src for g in active] + [tuple(src)]
@@ -339,7 +351,8 @@ class GeorefSession(object):
         self._request_preview()
 
     def set_drag_gcp_preview(self, idx, new_dst):
-        '''既存 GCP の dst をドラッグ中の位置に置き換えてプレビューだけ更新する。'''
+        '''Update only the preview with an existing GCP's dst replaced by the
+        dragged position.'''
         srcs = []
         dsts = []
         for j, g in enumerate(self.gcps):
@@ -356,18 +369,18 @@ class GeorefSession(object):
         self._request_preview()
 
     def clear_drag_preview(self):
-        '''ドラッグ確定/中断時に通常プレビューへ戻す。'''
+        '''Return to the normal preview when a drag is committed/cancelled.'''
         self._dragging = False
         self._draw_matrix = self.matrix
         self._request_preview()
 
     def preview_pos(self, src):
-        '''元座標 src の現在のプレビュー上の位置を返す。'''
+        '''Return the current preview position of the source coordinate src.'''
         p = transform.apply_matrix(self.matrix, [src])[0]
         return QgsPointXY(p[0], p[1])
 
     def _request_preview(self):
-        '''プレビュー描画をスロットリングしながら要求する。'''
+        '''Request a preview redraw with throttling.'''
         interval = QUALITY[self.quality]['interval'] / 1000.0
         now = time.monotonic()
         if now - self._last_update >= interval:
@@ -387,9 +400,10 @@ class GeorefSession(object):
         self.canvas.refresh()
 
     def _maybe_simplify(self, geom):
-        '''頂点数が多い場合のみ、表示用にジオメトリを簡略化する。
+        '''Simplify the geometry for display only when it has many vertices.
 
-        ドラッグ中はしきい値を下げ・許容量を増やしてさらに軽くする。
+        While dragging, lower the threshold and raise the tolerance to make it
+        even lighter.
         '''
         threshold = SIMPLIFY_THRESHOLD
         factor = QUALITY[self.quality]['simplify']
@@ -403,7 +417,7 @@ class GeorefSession(object):
         return simplified if simplified and not simplified.isEmpty() else geom
 
     # ------------------------------------------------------------------
-    # GCP マーカー（誤差で色分け・アクティブ状態表示）
+    # GCP markers (colored by error, active state shown)
     # ------------------------------------------------------------------
     def _clear_markers(self):
         for m in self.markers:
@@ -417,7 +431,7 @@ class GeorefSession(object):
         stats = self._stats()
         per_point = stats['per_point']
 
-        # アクティブ GCP のインデックス対応（per_point はアクティブ分のみ）
+        # Map active GCP indices (per_point covers active points only).
         active_idx = [i for i, g in enumerate(self.gcps) if g.active]
         mag_by_gcp = {}
         for k, gi in enumerate(active_idx):
@@ -437,8 +451,9 @@ class GeorefSession(object):
                 m.setColor(QColor(150, 150, 150))
             self.markers.append(m)
 
-        # 残差表示: GCP ごとに「プレビュー上に着地したノード」→「目標点(dst)」を
-        # 結ぶ独立した線分として描く（addGeometry で各線分を分離して描画）。
+        # Residual display: for each GCP draw an independent segment from the
+        # node that landed on the preview to the target point (dst). addGeometry
+        # keeps each segment separate.
         for g in self.gcps:
             if not g.active:
                 continue
@@ -450,7 +465,7 @@ class GeorefSession(object):
             self.rb_residual.addGeometry(seg, None)
 
     # ------------------------------------------------------------------
-    # 残差統計
+    # Residual statistics
     # ------------------------------------------------------------------
     def _stats(self):
         active = self.active_gcps()
@@ -461,10 +476,10 @@ class GeorefSession(object):
         return transform.error_stats(self.matrix, src, dst)
 
     def scale_factors(self):
-        '''現在の変換行列の拡大率を返す (overall, x方向, y方向)。
+        '''Return the scale of the current transform matrix (overall, x, y).
 
-        ヘルメルト（相似）なら3つは一致する。アフィンは方向ごとに異なりうる。
-        overall は面積比の平方根（= 線形拡大率）。
+        For Helmert (similarity) the three agree; affine can differ per axis.
+        overall is the square root of the area ratio (= linear scale).
         '''
         a, b = self.matrix[0, 0], self.matrix[0, 1]
         d, e = self.matrix[1, 0], self.matrix[1, 1]
@@ -477,11 +492,11 @@ class GeorefSession(object):
     def _notify_stats(self):
         if not self.on_update:
             return
-        stats = self._stats()  # RMS/標準偏差はアクティブ点のみで算出
+        stats = self._stats()  # RMS/std computed from active points only
         rows = []
         mags = []
         for i, g in enumerate(self.gcps):
-            # 無効な GCP も含め、全点について現在の行列での残差を表示する
+            # Show the residual at the current matrix for every point, inactive included.
             res = transform.residuals(self.matrix, [g.src], [g.dst])[0]
             ex, ey = float(res[0]), float(res[1])
             mag = float((ex * ex + ey * ey) ** 0.5)
@@ -500,13 +515,14 @@ class GeorefSession(object):
         })
 
     # ------------------------------------------------------------------
-    # スナップ（キャンバス操作からの問い合わせ）
+    # Snapping (queries from canvas interaction)
     # ------------------------------------------------------------------
     def snap_source(self, map_point, tol_map):
-        '''現在のプレビュー上で map_point に最も近いアンカー頂点を探す。
+        '''Find the anchor vertex closest to map_point on the current preview.
 
-        見つかれば、その頂点の「元座標」を返す（プレビュー位置ではなく元位置）。
-        2 点目以降はプレビュー上のノードから取得する仕様に対応する。
+        If found, return its source (original) coordinate, not the preview
+        position. This supports taking nodes from the preview from the 2nd
+        point onward.
         '''
         if len(self._anchors) == 0:
             return None
@@ -516,17 +532,19 @@ class GeorefSession(object):
         d2 = dx * dx + dy * dy
         i = int(np.argmin(d2))
         if np.sqrt(d2[i]) <= tol_map:
-            # 掴んだノードの所属地物を控える（単一地物モードの対象確定に使う）
+            # Remember the feature of the grabbed node (used to confirm the single target).
             if i < len(self._anchor_fids):
                 self._last_snap_fid = int(self._anchor_fids[i])
             return (self._anchors[i, 0], self._anchors[i, 1])
         return None
 
     def _nearest_layer_vertex(self, map_point, tol_map, include_self):
-        '''表示中ベクタレイヤから map_point 最近傍の頂点（マップ座標）を返す。
+        '''Return the vertex (map coordinate) closest to map_point among the
+        visible vector layers.
 
-        include_self=True なら対象レイヤ自身も含む（自己スナップ）。
-        同一 CRS のレイヤのみ対象。範囲フィルタで近傍地物だけ走査。なければ None。
+        include_self=True also includes the target layer itself (self-snap).
+        Only layers with the same CRS are considered; a rect filter scans only
+        nearby features. None if nothing is found.
         '''
         rect = QgsRectangle(
             map_point.x() - tol_map, map_point.y() - tol_map,
@@ -560,17 +578,18 @@ class GeorefSession(object):
         return best
 
     def snap_dest(self, map_point, tol_map):
-        '''変換先スナップ: 表示中の全ベクタレイヤ（自己含む）の最近傍頂点。'''
+        '''Destination snap: nearest vertex of any visible vector layer (incl. self).'''
         return self._nearest_layer_vertex(map_point, tol_map, include_self=True)
 
     def snap_source_other(self, map_point, tol_map):
-        '''変換元スナップ（対象ジオメトリ以外）: 他の表示中レイヤの最近傍頂点。'''
+        '''Source snap (other than the target geometry): nearest vertex of other visible layers.'''
         return self._nearest_layer_vertex(map_point, tol_map, include_self=False)
 
     def map_to_source(self, pt):
-        '''マップ座標（現在のプレビュー空間）を元座標へ逆変換する。
+        '''Inverse-transform a map coordinate (current preview space) to source space.
 
-        任意点や他レイヤのノードを変換元に使うとき、元座標系へ戻すために使う。
+        Used to bring a free point or another layer's node back into the source
+        coordinate system when used as a transform source.
         '''
         A = self.matrix[:, :2]
         t = self.matrix[:, 2]
@@ -582,7 +601,7 @@ class GeorefSession(object):
         return (float(o[0]), float(o[1]))
 
     def nearest_gcp(self, map_point, tol_map):
-        '''map_point に近い既存 GCP（dst マーカー）のインデックスを返す。'''
+        '''Return the index of the existing GCP (dst marker) near map_point.'''
         best = None
         best_d = tol_map
         for i, g in enumerate(self.gcps):
@@ -594,7 +613,7 @@ class GeorefSession(object):
         return best
 
     # ------------------------------------------------------------------
-    # 元レイヤ表示の制御
+    # Source layer visibility control
     # ------------------------------------------------------------------
     def _hide_source_layer(self):
         node = QgsProject.instance().layerTreeRoot().findLayer(self.layer.id())
@@ -612,10 +631,11 @@ class GeorefSession(object):
         self._refresh_static()
 
     # ------------------------------------------------------------------
-    # 出力
+    # Output
     # ------------------------------------------------------------------
     def apply(self):
-        '''最終変換を全対象地物（フル解像度）に適用し、新規メモリレイヤを返す。'''
+        '''Apply the final transform to all target features (full resolution)
+        and return a new memory layer.'''
         if not self.active_gcps():
             return None
         t = transform.to_qtransform(self.matrix)
@@ -646,7 +666,7 @@ class GeorefSession(object):
         dp.addFeatures(new_feats)
         out.updateExtents()
 
-        # GCP・誤差情報をレイヤのカスタムプロパティに残す
+        # Keep GCP/error info in the layer custom properties.
         out.setCustomProperty('fvg/mode', self.mode)
         out.setCustomProperty('fvg/lock_scale', str(self.lock_scale))
         out.setCustomProperty('fvg/gcp_count', str(len(self.active_gcps())))
@@ -661,10 +681,11 @@ class GeorefSession(object):
         return out
 
     def apply_add(self):
-        '''変換後の地物を現在のレイヤへ新規地物として追加する（編集モードで実行）。
+        '''Add the transformed features to the current layer as new features
+        (run in edit mode).
 
-        レイヤを編集モードにしたまま追加するので、Ctrl+Z で取り消せる。
-        追加した地物数を返す。失敗時は None。
+        Done with the layer in edit mode so it can be undone with Ctrl+Z.
+        Returns the number of features added, or None on failure.
         '''
         if not self.active_gcps():
             return None
@@ -692,10 +713,11 @@ class GeorefSession(object):
         return len(feats)
 
     def apply_edit(self):
-        '''現在のレイヤの対象地物のジオメトリを変換後に置き換える（編集モードで実行）。
+        '''Replace the geometry of the current layer's target features with the
+        transformed geometry (run in edit mode).
 
-        レイヤを編集モードにしたまま変更するので、Ctrl+Z で取り消せる。
-        変更した地物数を返す。失敗時は None。
+        Done with the layer in edit mode so it can be undone with Ctrl+Z.
+        Returns the number of features changed, or None on failure.
         '''
         if not self.active_gcps():
             return None
@@ -714,13 +736,13 @@ class GeorefSession(object):
         return n
 
     def _ensure_editable(self):
-        '''レイヤを編集モードにする。既に編集中なら何もしない。可否を返す。'''
+        '''Put the layer into edit mode. No-op if already editing. Returns ok.'''
         if self.layer.isEditable():
             return True
         return bool(self.layer.startEditing())
 
     def save_gcps(self, path):
-        '''GCP と残差情報を CSV に保存する。'''
+        '''Save the GCPs and residual info to CSV.'''
         stats = self._stats()
         per_point = stats['per_point']
         active_idx = [i for i, g in enumerate(self.gcps) if g.active]
@@ -743,10 +765,12 @@ class GeorefSession(object):
             w.writerow(['# scale', overall, 'scaleX', sx, 'scaleY', sy])
 
     def load_gcps(self, path):
-        '''CSV から GCP を読み込んで再現する（別レイヤへ同じ変換を流用する用途）。
+        '''Load and reproduce GCPs from CSV (to reuse the same transform on
+        another layer).
 
-        save_gcps が出力した形式（index, active, srcX, srcY, dstX, dstY, ...）を読む。
-        同一参照系前提で src/dst の座標をそのまま使う。読み込んだ点数を返す。
+        Reads the format written by save_gcps (index, active, srcX, srcY, dstX,
+        dstY, ...). Assumes the same CRS and uses the src/dst coordinates as is.
+        Returns the number of points loaded.
         '''
         loaded = []
         with open(path, newline='', encoding='utf-8') as fp:
@@ -766,7 +790,7 @@ class GeorefSession(object):
             return 0
 
         self.gcps = [Gcp(src, dst, active) for src, dst, active in loaded]
-        # 単一地物モードで未確定なら、先頭 GCP に最も近い候補地物を対象にする
+        # In single mode, if not yet confirmed, target the candidate nearest the first GCP.
         if (self.scope == 'single' and self._locked_fid is None
                 and self._candidates):
             first = QgsPointXY(loaded[0][0][0], loaded[0][0][1])
@@ -779,7 +803,7 @@ class GeorefSession(object):
         return len(self.gcps)
 
     def _nearest_candidate_fid(self, point):
-        '''単一地物モードの候補のうち、point に最も近い地物 id を返す。'''
+        '''Return the candidate feature id nearest to point (single mode).'''
         pg = QgsGeometry.fromPointXY(point)
         best = None
         best_d = None
@@ -791,7 +815,7 @@ class GeorefSession(object):
         return best
 
     # ------------------------------------------------------------------
-    # 後始末
+    # Teardown
     # ------------------------------------------------------------------
     def cleanup(self):
         self._timer.stop()

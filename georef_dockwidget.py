@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-'''操作パネル（ドックウィジェット）。
+'''Operation panel (dock widget).
 
-レイヤ・対象範囲・変換モードの選択、GCP テーブルと誤差表示、適用/保存を提供する。
-数値入力 UI は持たない（ユーザーはパラメータを直接入力しない）。
+Provides the layer / scope / transform-mode selection, the GCP table with the
+error display, and apply / save. There is no numeric-input UI (the user never
+enters parameters directly).
 '''
 
 import os
@@ -37,12 +38,13 @@ from .georef_maptool import GeorefMapTool
 
 
 class _NumItem(QTableWidgetItem):
-    '''数値順にソートするテーブル項目（表示は整形済み文字列）。空値は末尾。'''
+    '''Table item sorted numerically (the display is a formatted string).
+    Empty values sort last.'''
 
     def __init__(self, text, value):
         super().__init__(text)
         self._value = value
-        # 編集不可・選択と表示のみ
+        # Not editable; selectable and display only.
         self.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
 
     def __lt__(self, other):
@@ -53,7 +55,7 @@ class _NumItem(QTableWidgetItem):
 
 
 class _CheckItem(QTableWidgetItem):
-    '''チェック状態（有効を先）→ GCP 番号 の順でソートするテーブル項目。'''
+    '''Table item sorted by check state (active first) then GCP number.'''
 
     def __lt__(self, other):
         sa = 0 if self.checkState() == Qt.CheckState.Checked else 1
@@ -70,19 +72,19 @@ class GeorefDockWidget(QgsDockWidget):
         super().__init__('Freehand Vector Georeferencer', parent)
         self.iface = iface
         self.session = None
-        # 停止後も Save できるように、直近の（停止済み）セッションを保持する
+        # Keep the most recent (stopped) session so Save still works after stop.
         self._last_session = None
         self.maptool = None
         self._syncing = False
-        # 選択数の変化を監視している対象レイヤ（開始可否の判定に使う）
+        # Target layer whose selection count is being watched (for start gating).
         self._sel_layer = None
 
         self._build_ui()
         self._preselect_active_layer()
 
     def _preselect_active_layer(self):
-        # アクティブレイヤがベクタなら対象レイヤの既定にする。
-        # セッション実行中は座標基準が変わるため上書きしない。
+        # Default the target layer to the active layer if it is a vector layer.
+        # Do not override during a running session (the coordinate basis changes).
         if self.session is not None:
             return
         layer = self.iface.activeLayer()
@@ -91,13 +93,15 @@ class GeorefDockWidget(QgsDockWidget):
         self._on_layer_changed()
 
     def _on_layer_changed(self, layer=None):
-        # 対象レイヤが変わったら CRS 警告・選択監視・開始可否を更新する
+        # When the target layer changes, refresh the CRS warning, selection
+        # watching and the start gating.
         self._update_crs_warning()
         self._reconnect_selection()
         self._update_idle_primary()
 
     def _reconnect_selection(self):
-        # 選択数の変化で開始可否が変わるため、対象レイヤの selectionChanged を監視
+        # Selection count affects whether Start is possible, so watch the
+        # target layer's selectionChanged.
         if self._sel_layer is not None:
             try:
                 self._sel_layer.selectionChanged.disconnect(
@@ -114,7 +118,7 @@ class GeorefDockWidget(QgsDockWidget):
         self._update_idle_primary()
 
     def _can_start(self):
-        # 開始しても意味があるか（地物がある／選択スコープなら選択がある）
+        # Whether starting is meaningful (has features / has a selection when scope=selected).
         layer = self.layerCombo.currentLayer()
         if not isinstance(layer, QgsVectorLayer):
             return False
@@ -126,12 +130,12 @@ class GeorefDockWidget(QgsDockWidget):
         return True
 
     def _update_idle_primary(self, *args):
-        # 待機中（セッション未開始）の Start は、開始可能なときだけ押せる
+        # When idle (no session), Start is enabled only when starting is possible.
         if self.session is None:
             self.primaryBtn.setEnabled(self._can_start())
 
     def _update_crs_warning(self):
-        # レイヤCRSとプロジェクトCRSが異なれば、赤文字の警告を常時表示する
+        # Always show a red warning when the layer CRS differs from the project CRS.
         layer = self.layerCombo.currentLayer()
         proj_crs = QgsProject.instance().crs()
         if layer is not None and layer.crs() != proj_crs:
@@ -146,7 +150,7 @@ class GeorefDockWidget(QgsDockWidget):
             self.crsWarn.hide()
 
     def _show_crs_detail(self, _link):
-        # クリックで詳細説明を標準のメッセージビューア（読み取り専用）に表示
+        # On click, show the detailed note in the standard (read-only) message viewer.
         viewer = QgsMessageViewer(self)
         viewer.setWindowTitle('CRS / projection — please read')
         viewer.setMessageAsHtml(self._crs_detail_html())
@@ -179,15 +183,15 @@ class GeorefDockWidget(QgsDockWidget):
             'then georeference.</p>')
 
     # ------------------------------------------------------------------
-    # UI 構築
+    # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
         root = QWidget()
         layout = QVBoxLayout(root)
 
-        # 設定フォーム（上から Transform → Scope → Target layer）
+        # Settings form (top to bottom: Transform -> Scope -> Target layer).
         form = QFormLayout()
-        # 変換モード（プルダウン）。currentData は (mode, lock_scale) のタプル
+        # Transform mode (combo). currentData is a (mode, lock_scale) tuple.
         self.transformCombo = QComboBox()
         self.transformCombo.addItem(
             'Helmert (move / rotate, fixed scale)', ('helmert', True))
@@ -195,22 +199,22 @@ class GeorefDockWidget(QgsDockWidget):
             'Helmert (move / rotate / scale)', ('helmert', False))
         self.transformCombo.addItem(
             'Affine (move / rotate / scale / shear)', ('affine', False))
-        self.transformCombo.setCurrentIndex(0)  # 既定: ヘルメルト（等倍固定）
+        self.transformCombo.setCurrentIndex(0)  # default: Helmert (fixed scale)
         form.addRow('Transform', self.transformCombo)
 
-        # 対象範囲（プルダウン）。内部値は currentData で取得する
+        # Scope (combo). The internal value is read via currentData.
         self.scopeCombo = QComboBox()
         self.scopeCombo.addItem('Single feature', 'single')
         self.scopeCombo.addItem('Selected features only', 'selected')
         self.scopeCombo.addItem('Whole layer', 'all')
-        self.scopeCombo.setCurrentIndex(0)  # 既定は単一地物
+        self.scopeCombo.setCurrentIndex(0)  # default: single feature
         form.addRow('Scope', self.scopeCombo)
 
         self.layerCombo = QgsMapLayerComboBox()
         self.layerCombo.setFilters(QgsMapLayerProxyModel.Filter.VectorLayer)
         form.addRow('Target layer', self.layerCombo)
 
-        # 適用方法を選ぶプルダウン（同じフォームに入れて他と幅を揃える）
+        # Apply-method combo (kept in the same form so its width matches the others).
         self.applyModeCombo = QComboBox()
         self.applyModeCombo.addItem('Generate new layer', 'new')
         self.applyModeCombo.addItem('Add to current layer', 'add')
@@ -218,7 +222,7 @@ class GeorefDockWidget(QgsDockWidget):
         form.addRow('Apply as', self.applyModeCombo)
         layout.addLayout(form)
 
-        # 操作ガイド
+        # Operation guide.
         self.hint = QLabel(
             'Press Start, then grab an old node and release at the new '
             'position to add control points.')
@@ -226,7 +230,8 @@ class GeorefDockWidget(QgsDockWidget):
         self.hint.setStyleSheet('color: #555;')
         layout.addWidget(self.hint)
 
-        # CRS 不一致の常時警告（赤文字・クリックで詳細）。Start ボタンの直上に置く
+        # Persistent CRS-mismatch warning (red, click for details). Placed just
+        # above the Start button.
         self.crsWarn = QLabel()
         self.crsWarn.setWordWrap(True)
         self.crsWarn.setOpenExternalLinks(False)
@@ -234,7 +239,8 @@ class GeorefDockWidget(QgsDockWidget):
         self.crsWarn.hide()
         layout.addWidget(self.crsWarn)
 
-        # 主ボタン: 待機時は Start、セッション中は Apply（同一ボタン・大きめで目立たせる）
+        # Primary button: Start when idle, Apply during a session (same button,
+        # larger and bold to stand out).
         self.primaryBtn = QPushButton('Start')
         self.primaryBtn.setMinimumHeight(34)
         pf = self.primaryBtn.font()
@@ -242,7 +248,7 @@ class GeorefDockWidget(QgsDockWidget):
         self.primaryBtn.setFont(pf)
         layout.addWidget(self.primaryBtn)
 
-        # 副ボタン: 直前の点を取り消し / セッションをリセット（中断・GCPは残る）
+        # Secondary buttons: undo the last point / reset the session (cancel, GCPs kept).
         self.undoBtn = QPushButton('Undo point')
         self.resetBtn = QPushButton('Reset')
         rowSec = QHBoxLayout()
@@ -250,7 +256,7 @@ class GeorefDockWidget(QgsDockWidget):
         rowSec.addWidget(self.resetBtn)
         layout.addLayout(rowSec)
 
-        # GCP ファイル入出力
+        # GCP file I/O.
         self.saveBtn = QPushButton('Save GCPs')
         self.loadBtn = QPushButton('Load GCPs')
         rowIO = QHBoxLayout()
@@ -258,7 +264,7 @@ class GeorefDockWidget(QgsDockWidget):
         rowIO.addWidget(self.loadBtn)
         layout.addLayout(rowIO)
 
-        # プレビュー品質（Save/Load の直下）
+        # Preview quality (just below Save/Load).
         formQuality = QFormLayout()
         self.qualityCombo = QComboBox()
         self.qualityCombo.addItems(list(QUALITY.keys()))
@@ -266,12 +272,12 @@ class GeorefDockWidget(QgsDockWidget):
         formQuality.addRow('Preview quality', self.qualityCombo)
         layout.addLayout(formQuality)
 
-        # 誤差サマリ
+        # Error summary.
         self.statLabel = QLabel('RMS: -   Std dev: -   Scale: -')
         layout.addWidget(self.statLabel)
 
-        # GCP テーブル（最下部に配置し、残り高さいっぱいに伸縮させる）
-        # 列: On(チェック) / #(作成順) / X誤差 / Y誤差 / 残差
+        # GCP table (placed at the bottom and stretched to fill the height).
+        # Columns: On (check) / # (creation order) / X error / Y error / Residual.
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
             ['On', '#', 'X error', 'Y error', 'Residual'])
@@ -281,16 +287,16 @@ class GeorefDockWidget(QgsDockWidget):
         for c in (2, 3, 4):
             header.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setDefaultSectionSize(22)
-        # 手書き編集は不可、列ヘッダクリックで値に基づきソート
+        # No hand editing; click a column header to sort by value.
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(True)
-        # 既定は作成順（# 列の昇順）。ヘッダクリックで他の列にも並べ替え可
+        # Default is creation order (# column ascending); other columns sortable too.
         self.table.sortByColumn(1, Qt.SortOrder.AscendingOrder)
         layout.addWidget(self.table, 1)
 
         self.setWidget(root)
 
-        # シグナル接続
+        # Signal connections.
         self.primaryBtn.clicked.connect(self._on_primary)
         self.undoBtn.clicked.connect(self._on_undo)
         self.resetBtn.clicked.connect(self._on_reset)
@@ -307,24 +313,24 @@ class GeorefDockWidget(QgsDockWidget):
         self._on_layer_changed()
 
     # ------------------------------------------------------------------
-    # セッション制御
+    # Session control
     # ------------------------------------------------------------------
     def _current_scope(self):
         return self.scopeCombo.currentData()
 
     def _current_transform(self):
-        # (mode, lock_scale) を返す
+        # Returns (mode, lock_scale).
         return self.transformCombo.currentData()
 
     def _on_primary(self):
-        # 待機中は Start（セッション開始）、セッション中は Apply（適用）
+        # Idle: Start (begin a session). Running: Apply.
         if self.session is None:
             self._start_session()
         else:
             self._on_apply()
 
     def _on_reset(self):
-        # 現在のセッションを中断（GCP リストは残す）。Apply はしない
+        # Cancel the current session (keep the GCP list). Does not apply.
         self._stop_session()
 
     def _start_session(self):
@@ -344,7 +350,7 @@ class GeorefDockWidget(QgsDockWidget):
             return
 
         mode, lock = self._current_transform()
-        # 新しいセッションを始めるので、保存用に残していた直近セッションは破棄
+        # Starting a new session, so discard the last session kept for saving.
         self._last_session = None
         self.session = GeorefSession(
             self.iface, layer, scope, mode, lock,
@@ -380,22 +386,22 @@ class GeorefDockWidget(QgsDockWidget):
             self.maptool.cleanup()
             self.maptool = None
         if self.session:
-            # 停止後も Save できるよう、GCP を持つセッションは参照を残す
+            # Keep a reference to the session with GCPs so Save still works after stop.
             self._last_session = self.session if self.session.gcps else None
             self.session.cleanup()
             self.session = None
         self.primaryBtn.setText('Start')
-        # 待機中の Start は開始可能なときだけ押せる
+        # When idle, Start is enabled only when starting is possible.
         self._update_idle_primary()
-        # GCP リスト/統計は次に Start するまで残す（Apply 後も参照できるように）。
-        # 次の Start 時に新セッションの recompute が空の内容で上書きする。
+        # Keep the GCP list/stats until the next Start (so they can be reviewed
+        # after Apply). The next Start overwrites them with the new session's recompute.
         self._update_enabled(False)
-        # GCP が残っていれば Save だけは引き続き使える
+        # If GCPs remain, only Save stays usable.
         self.saveBtn.setEnabled(self._last_session is not None)
         self._lock_setup_widgets(False)
 
     def _lock_setup_widgets(self, locked):
-        # セッション中はレイヤ・範囲の変更を禁止（GCP の座標基準が変わるため）
+        # During a session, forbid changing layer/scope (the GCP coordinate basis changes).
         self.layerCombo.setEnabled(not locked)
         self.scopeCombo.setEnabled(not locked)
 
@@ -404,7 +410,7 @@ class GeorefDockWidget(QgsDockWidget):
             b.setEnabled(active)
 
     # ------------------------------------------------------------------
-    # 操作ハンドラ
+    # Operation handlers
     # ------------------------------------------------------------------
     def _on_undo(self):
         if self.session:
@@ -446,14 +452,14 @@ class GeorefDockWidget(QgsDockWidget):
                     'undo with Ctrl+Z, then save to keep.'.format(n, name))
         else:
             return
-        # 適用のたびに GCP を一時 CSV へ自動保存し、開くボタン付きで通知する
+        # On every apply, auto-save the GCPs to a temp CSV and notify with an Open button.
         path = self._autosave_gcps()
         self._notify_apply(text, path)
-        # 適用後はセッションを終了し、別レイヤ/範囲を選べるようにする
+        # After applying, end the session so another layer/scope can be selected.
         self._stop_session()
 
     def _autosave_gcps(self):
-        '''適用時の GCP を一時ファイル(CSV)へ保存し、パスを返す。失敗時 None。'''
+        '''Save the apply-time GCPs to a temp CSV and return its path. None on failure.'''
         sess = self.session
         if not sess or not sess.gcps:
             return None
@@ -468,12 +474,12 @@ class GeorefDockWidget(QgsDockWidget):
         return path
 
     def _notify_apply(self, text, csv_path):
-        '''結果をメッセージバーに表示。CSV があればパスをログにも出し、
-        保存先フォルダを開くボタンを付ける。'''
+        '''Show the result in the message bar. If a CSV exists, log its path and
+        add a button to open the containing folder.'''
         mb = self.iface.messageBar()
         if csv_path:
             text = text + '  (GCP CSV: {})'.format(csv_path)
-            # ログメッセージパネルにもパスを記録する
+            # Also record the path in the Log Messages panel.
             QgsMessageLog.logMessage(
                 'GCP CSV saved: {}'.format(csv_path),
                 'Freehand Vector Georeferencer', Qgis.Info)
@@ -498,7 +504,7 @@ class GeorefDockWidget(QgsDockWidget):
             'editable.', level=Qgis.Warning, duration=4)
 
     def _on_save(self):
-        # 実行中セッション、なければ停止済みの直近セッションを使う
+        # Use the running session, or the most recent stopped session if none.
         sess = self.session or self._last_session
         if not sess or not sess.gcps:
             return
@@ -540,16 +546,17 @@ class GeorefDockWidget(QgsDockWidget):
         self.session.set_active(idx, active)
 
     # ------------------------------------------------------------------
-    # 統計・テーブル更新（セッションからのコールバック）
+    # Stats / table update (callback from the session)
     # ------------------------------------------------------------------
     def _refresh_stats(self, data):
         self._syncing = True
-        # 再描画中はソートを止め（行挿入の度の並べ替えを防ぐ）、最後に戻す
+        # Disable sorting during repopulation (avoid re-sorting on every insert),
+        # then restore it at the end.
         self.table.setSortingEnabled(False)
         rows = data['rows']
         self.table.setRowCount(len(rows))
         for r, row in enumerate(rows):
-            # 0列: ON/OFF チェック（テキストなし）。UserRole に GCP の元 index
+            # Column 0: on/off check (no text). UserRole holds the GCP's original index.
             chk = _CheckItem('')
             chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable |
                          Qt.ItemFlag.ItemIsEnabled)
@@ -558,7 +565,7 @@ class GeorefDockWidget(QgsDockWidget):
             chk.setData(Qt.ItemDataRole.UserRole, row['index'])
             self.table.setItem(r, 0, chk)
 
-            # 1列: 作成順（#番号）。数値順ソート用の値も持たせる
+            # Column 1: creation order (# number). Carries the numeric sort value too.
             num = _NumItem('#{}'.format(row['index'] + 1), row['index'] + 1)
             self.table.setItem(r, 1, num)
 
@@ -577,7 +584,7 @@ class GeorefDockWidget(QgsDockWidget):
         self.statLabel.setText(
             'RMS: {:.3f}   Std dev: {:.3f}   Scale: ×{:.4f}'.format(
                 data['rms'], data['std'], data.get('scale', 1.0)))
-        # セッション中の Apply は有効 GCP が 1 つ以上あるときだけ押せる
+        # During a session, Apply is enabled only when at least one GCP is active.
         if self.session is not None:
             active = sum(1 for r in rows if r['active'])
             self.primaryBtn.setEnabled(active > 0)

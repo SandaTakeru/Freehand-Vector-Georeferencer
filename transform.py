@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-'''対応点（GCP）から変換行列を計算するモジュール。
+'''Computes the transform matrix from control points (GCPs).
 
-NumPy で最小二乗フィットを行い、2x3 のアフィン行列 M を返す。
+A least-squares fit (NumPy) returns a 2x3 affine matrix M:
   x' = M[0,0]*x + M[0,1]*y + M[0,2]
   y' = M[1,0]*x + M[1,1]*y + M[1,2]
 
-変換モードは 2 種類のみ:
-  - 'helmert': 回転 + 平行移動（+ 任意の等倍）。lock_scale=True で scale=1 固定（剛体）
-  - 'affine' : 回転 + 平行移動 + 拡大縮小 + 剪断（フル 6 パラメータ）
+Only two transform modes:
+  - 'helmert': rotation + translation (+ optional uniform scale).
+               lock_scale=True keeps scale=1 (rigid).
+  - 'affine' : rotation + translation + scale + shear (full 6 parameters).
 
-点数が足りない場合は段階的にフォールバックする:
-  1 点 → 平行移動のみ / 2 点 → ヘルメルト相当 / 3 点以上 → 各モードの本来の自由度
+When there are too few points it falls back gradually:
+  1 point -> translation only / 2 points -> Helmert-equivalent /
+  3+ points -> the full degrees of freedom of the selected mode.
 '''
 
 import numpy as np
@@ -21,13 +23,13 @@ def _identity():
 
 
 def _translation(src, dst):
-    # 平行移動のみ。対応点の重心差で決める
+    # Translation only, from the centroid difference of the point pairs.
     t = (dst - src).mean(axis=0)
     return np.array([[1.0, 0.0, t[0]], [0.0, 1.0, t[1]]])
 
 
 def _rigid(src, dst):
-    # 等倍固定（剛体）: 直交プロクラステス法で最適回転を求める
+    # Fixed scale (rigid): optimal rotation via orthogonal Procrustes.
     mu_s = src.mean(axis=0)
     mu_d = dst.mean(axis=0)
     S = src - mu_s
@@ -41,7 +43,8 @@ def _rigid(src, dst):
 
 
 def _similarity(src, dst):
-    # ヘルメルト（相似）: x' = a*x - b*y + tx, y' = b*x + a*y + ty を最小二乗で解く
+    # Helmert (similarity): least-squares solve of
+    # x' = a*x - b*y + tx, y' = b*x + a*y + ty.
     A = []
     B = []
     for (x, y), (X, Y) in zip(src, dst):
@@ -55,7 +58,8 @@ def _similarity(src, dst):
 
 
 def _affine(src, dst):
-    # アフィン: x' = a*x + b*y + c, y' = d*x + e*y + f を成分ごとに最小二乗で解く
+    # Affine: least-squares solve per component of
+    # x' = a*x + b*y + c, y' = d*x + e*y + f.
     A = np.column_stack([src[:, 0], src[:, 1], np.ones(len(src))])
     px, _r1, _k1, _s1 = np.linalg.lstsq(A, dst[:, 0], rcond=None)
     py, _r2, _k2, _s2 = np.linalg.lstsq(A, dst[:, 1], rcond=None)
@@ -63,9 +67,9 @@ def _affine(src, dst):
 
 
 def compute_matrix(src, dst, mode='helmert', lock_scale=False):
-    '''対応点から 2x3 変換行列を計算する。
+    '''Computes a 2x3 transform matrix from the control points.
 
-    src, dst : Nx2 の配列（旧座標 / 新座標）
+    src, dst : Nx2 arrays (old coordinates / new coordinates).
     '''
     src = np.asarray(src, dtype=float).reshape(-1, 2)
     dst = np.asarray(dst, dtype=float).reshape(-1, 2)
@@ -77,7 +81,7 @@ def compute_matrix(src, dst, mode='helmert', lock_scale=False):
     if mode == 'affine':
         if n >= 3:
             return _affine(src, dst)
-        # 2 点ではアフィンは未決定なのでヘルメルトにフォールバック
+        # Affine is underdetermined with 2 points, so fall back to Helmert.
         return _similarity(src, dst)
     # helmert
     if lock_scale:
@@ -86,25 +90,25 @@ def compute_matrix(src, dst, mode='helmert', lock_scale=False):
 
 
 def apply_matrix(M, pts):
-    '''Nx2 の点群に 2x3 行列を適用して Nx2 を返す。'''
+    '''Applies the 2x3 matrix to an Nx2 point set and returns Nx2.'''
     pts = np.asarray(pts, dtype=float).reshape(-1, 2)
     return (M[:, :2] @ pts.T + M[:, 2:3]).T
 
 
 def residuals(M, src, dst):
-    '''各対応点の残差 dst - 変換後src を Nx2 で返す。'''
+    '''Returns the per-point residuals (dst - transformed src) as Nx2.'''
     src = np.asarray(src, dtype=float).reshape(-1, 2)
     dst = np.asarray(dst, dtype=float).reshape(-1, 2)
     return dst - apply_matrix(M, src)
 
 
 def error_stats(M, src, dst):
-    '''残差統計をまとめて返す。
+    '''Returns residual statistics.
 
-    戻り値 dict:
+    Returned dict:
       per_point : Nx3 (ex, ey, mag)
-      rms       : 全体 RMS（mag ベース）
-      std       : mag の標準偏差
+      rms       : overall RMS (based on mag)
+      std       : standard deviation of mag
     '''
     res = residuals(M, src, dst)
     if len(res) == 0:
@@ -117,12 +121,12 @@ def error_stats(M, src, dst):
 
 
 def to_qtransform(M):
-    '''2x3 行列を QTransform に変換する。
+    '''Converts the 2x3 matrix to a QTransform.
 
-    QTransform(m11, m12, m21, m22, dx, dy) は
+    QTransform(m11, m12, m21, m22, dx, dy) means
       x' = m11*x + m21*y + dx
       y' = m12*x + m22*y + dy
-    なので、本モジュールの M とは下記の対応になる。
+    which maps to this module's M as below.
     '''
     from qgis.PyQt.QtGui import QTransform
     return QTransform(

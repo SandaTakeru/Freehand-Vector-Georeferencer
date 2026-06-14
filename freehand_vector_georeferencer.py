@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-'''Freehand Vector Georeferencer プラグイン本体。
+'''Freehand Vector Georeferencer main plugin.
 
-ベクタレイヤを直感的に既知点へ合わせ込むジオリファレンスツール。
-ツールバーのアイコンからドックパネルを開いて操作する。
+An intuitive georeferencing tool that aligns vector layers to known points.
+Open the dock panel from the toolbar icon to operate it.
 
-謝辞 / Acknowledgment:
-  本プラグインのインタラクティブUI（マップツール、ラバーバンドによる
-  プレビュー、ノードを掴んで動かす操作感）は、Guilhem Vellut 氏による
-  "Freehand Raster Georeferencer" プラグイン
-  (https://github.com/gvellut/FreehandRasterGeoreferencer) に着想を得ています。
-  素晴らしい先行プラグインに深く感謝します。
+Acknowledgment:
+  The interactive UI of this plugin (the map tool, the rubber-band preview and
+  the "grab a node and move it" feel) is inspired by the
+  "Freehand Raster Georeferencer" plugin by Guilhem Vellut
+  (https://github.com/gvellut/FreehandRasterGeoreferencer).
+  Many thanks for that great earlier work.
 '''
 
 import os.path
@@ -30,8 +30,8 @@ class FreehandVectorGeoreferencer(object):
         self.dock = None
 
     def initGui(self):
-        # 先にアクションとツールバーアイコンを用意する（ドック生成は遅延し、
-        # 万一の失敗でもツールバーからアイコンが消えないようにする）
+        # Create the action and toolbar icon first; the dock is created lazily
+        # so the toolbar icon never disappears even if dock creation fails.
         icon = QIcon(os.path.join(self.plugin_dir, 'icon.png'))
         self.action = QAction(icon, 'Freehand Vector Georeferencer',
                               self.iface.mainWindow())
@@ -39,7 +39,7 @@ class FreehandVectorGeoreferencer(object):
         self.action.setCheckable(True)
         self.action.triggered.connect(self.toggle_dock)
 
-        # 専用ツールバーにアイコンを表示
+        # Show the icon on a dedicated toolbar.
         self.toolbar = self.iface.addToolBar('Freehand Vector Georeferencer')
         self.toolbar.setObjectName('FreehandVectorGeoreferencerToolbar')
         self.toolbar.addAction(self.action)
@@ -53,8 +53,9 @@ class FreehandVectorGeoreferencer(object):
             self.dock = None
         if self.action is not None:
             self.iface.removePluginVectorMenu(self.menu, self.action)
-        # ツールバー/アクションは即時破棄する（再読込時に objectName が重複し
-        # 「duplicated widget not cleaned up」警告が出るのを防ぐ）
+        # Destroy the toolbar/action immediately so that on reload the
+        # objectName is not duplicated (avoids the "duplicated widget not
+        # cleaned up" warning).
         if self.toolbar is not None:
             self.iface.mainWindow().removeToolBar(self.toolbar)
             sip.delete(self.toolbar)
@@ -64,7 +65,7 @@ class FreehandVectorGeoreferencer(object):
             self.action = None
 
     def _ensure_dock(self):
-        # ドックは初回使用時に生成する
+        # Create the dock on first use.
         if self.dock is None:
             from .georef_dockwidget import GeorefDockWidget
             self.dock = GeorefDockWidget(self.iface, self.iface.mainWindow())
@@ -75,7 +76,7 @@ class FreehandVectorGeoreferencer(object):
     def toggle_dock(self, checked):
         if checked:
             self._ensure_dock()
-            # アイコンを押して開くたびに、現在のアクティブレイヤを既定にする
+            # Each time the icon opens the dock, default to the active layer.
             self.dock._preselect_active_layer()
             self.dock.show()
             self.dock.raise_()
