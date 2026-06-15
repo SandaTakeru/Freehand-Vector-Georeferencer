@@ -4,7 +4,7 @@
 name=Freehand Vector Georeferencer
 qgisMinimumVersion=4.0
 description=An intuitive georeferencing (coordinate-correction) tool for vector layers. Grab an old node and release it at the new position to add control points, preview the Helmert/Affine transform in real time, and apply the result as a new layer, as features added to the current layer, or as an in-place edit.
-version=20260614
+version=20260616
 author=Sanda Takeru
 email=location.lab@sanda-takeru.com
 license=GPL-3.0
@@ -18,7 +18,7 @@ repository=https://github.com/SandaTakeru/Freehand-Vector-Georeferencer
 # Recommended items:
 
 hasProcessingProvider=no
-changelog=2026-06-14 First release.
+changelog=2026-06-16 First release.
     - Transforms: Helmert (fixed scale / with scale) and Affine
     - Editing: add GCPs with the mouse, live preview while dragging; click an existing GCP to toggle it, drag it to move its destination
     - Snapping: sources and destinations snap to vertices of any visible vector layer (self-snap supported); a source can also be a free point
