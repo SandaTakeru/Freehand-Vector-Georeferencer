@@ -10,10 +10,10 @@ preview the **Helmert / Affine** transform in real time, and apply the result.
 
 ## Demo
 
-[![Watch the demo video](media/demo-poster.png)](media/demo.mp4)
+![Demo](media/demo.gif)
 
-Click the image above to play the demo video (MP4). On GitHub it opens in the
-built-in video player.
+The animation above plays automatically. For the full-quality version, see the
+[demo video (MP4)](media/demo.mp4).
 
 ## Features
 
