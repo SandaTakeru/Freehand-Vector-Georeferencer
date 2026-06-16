@@ -10,10 +10,10 @@ preview the **Helmert / Affine** transform in real time, and apply the result.
 
 ## Demo
 
+[![Watch the demo video](media/demo-poster.png)](media/demo.mp4)
 
-https://github.com/user-attachments/assets/aa6e721d-2d70-482f-87b0-d96f6089c474
-
-
+Click the image above to play the demo video (MP4). On GitHub it opens in the
+built-in video player.
 
 ## Features
 
@@ -46,4 +46,6 @@ plugin by **Guilhem Vellut**. Many thanks for that great earlier work.
 
 ## License
 
-GNU General Public License v2.0 or later. See [LICENSE](LICENSE).
+GNU General Public License v3.0. See [LICENSE](LICENSE).
+This plugin is derived from work originally licensed under GPL v2 or later
+(see Acknowledgment above) and is distributed under GPL v3.
