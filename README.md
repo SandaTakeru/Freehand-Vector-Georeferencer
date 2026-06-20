@@ -2,6 +2,11 @@
   <img src="icon.png" alt="Plugin Icon" width="120"/>
 </p>
 
+> ## ➡️ This project has moved
+> Development continues at **[Freehand Georeferencer](https://github.com/SandaTakeru/Freehand-Georeferencer)** — the successor that now supports **both vector and raster** layers. Please head there for the latest version, issues and updates.
+>
+> 後継プロジェクト **[Freehand Georeferencer](https://github.com/SandaTakeru/Freehand-Georeferencer)**（ベクタ＋ラスタ対応）に移行しました。最新版・不具合報告はそちらをご利用ください。
+
 # Freehand Vector Georeferencer
 
 An intuitive georeferencing (coordinate-correction) tool for **vector** layers in QGIS.
